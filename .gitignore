@@ -1,0 +1,90 @@
+# ----------------------------
+# Core research repo hygiene
+# ----------------------------
+
+# Python bytecode / caches
+__pycache__/
+*.py[cod]
+*.so
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# Build / packaging
+build/
+dist/
+.eggs/
+*.egg-info/
+pip-wheel-metadata/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# IDE / editor / OS noise
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Secrets / local env
+.env
+.env.*
+*.pem
+*.key
+*.token
+secrets/
+
+# Local caches / temp
+.cache/
+.pip-cache/
+.pip-tmp/
+tmp/
+temp/
+
+# Experiment tracking / logs
+wandb/
+logs/
+runs/
+*.log
+
+# Data and generated artifacts
+data/
+results/
+outputs/
+artifacts/
+checkpoints/
+refine-logs/
+
+# Large model / checkpoint / archive files
+*.pt
+*.pth
+*.bin
+*.ckpt
+*.safetensors
+*.onnx
+*.h5
+*.gguf
+*.tar
+*.tar.gz
+*.tgz
+*.zip
+*.7z
+
+# Local notes / tool state
+.claude/
+
+# Accidental stray files seen in this workspace
+/=*
+
+IDEA_REPORT*.md

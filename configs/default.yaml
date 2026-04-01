@@ -1,0 +1,67 @@
+# BiasMap-CP Default Configuration
+
+project:
+  name: biasmap-cp
+  version: sprint1
+  seed: 42
+
+paths:
+  data_root: /LOCAL/psqhe8/BiasMap-CP/data
+  results_root: /LOCAL2/psqhe8/BiasMap-CP/results
+  cache_dir: /LOCAL/psqhe8/hf_cache
+
+datasets:
+  vsr:
+    raw: /LOCAL/psqhe8/BiasMap-CP/data/raw/vsr
+    processed: /LOCAL/psqhe8/BiasMap-CP/data/processed/vsr.jsonl
+  whatsup:
+    raw: /LOCAL/psqhe8/BiasMap-CP/data/raw/whatsup
+    processed: /LOCAL/psqhe8/BiasMap-CP/data/processed/whatsup.jsonl
+  gsr_bench:
+    raw: /LOCAL/psqhe8/BiasMap-CP/data/raw/gsr_bench
+    processed: /LOCAL/psqhe8/BiasMap-CP/data/processed/gsr_bench.jsonl
+  gqa:
+    raw: /LOCAL/psqhe8/BiasMap-CP/data/raw/gqa
+    processed: /LOCAL/psqhe8/BiasMap-CP/data/processed/gqa_spatial.jsonl
+  clevr:
+    raw: /LOCAL/psqhe8/BiasMap-CP/data/raw/clevr
+    processed: /LOCAL/psqhe8/BiasMap-CP/data/processed/clevr.jsonl
+  nlvr2:
+    raw: /LOCAL/psqhe8/BiasMap-CP/data/raw/nlvr2
+    processed: /LOCAL/psqhe8/BiasMap-CP/data/processed/nlvr2.jsonl
+  spatialsense:
+    raw: /LOCAL/psqhe8/BiasMap-CP/data/raw/spatialsense
+    processed: /LOCAL/psqhe8/BiasMap-CP/data/processed/spatialsense.jsonl
+
+splits:
+  train_ratio: 0.60
+  cal_ratio: 0.20
+  test_ratio: 0.20
+  ood_target_size: 4000  # per OOD split
+
+models:
+  qwen2vl_2b:
+    hf_id: Qwen/Qwen2-VL-2B-Instruct
+    dtype: bfloat16
+    max_new_tokens: 32
+    batch_size: 8
+  qwen2vl_7b:
+    hf_id: Qwen/Qwen2-VL-7B-Instruct
+    dtype: bfloat16
+    max_new_tokens: 32
+    batch_size: 4
+  llava_7b:
+    hf_id: llava-hf/llava-1.5-7b-hf
+    dtype: bfloat16
+    max_new_tokens: 32
+    batch_size: 4
+  blip2:
+    hf_id: Salesforce/blip2-opt-2.7b
+    dtype: bfloat16
+    max_new_tokens: 32
+    batch_size: 8
+
+evaluation:
+  conformal_alpha: 0.1  # 90% coverage target
+  cvar_alpha: 0.1       # CVaR at 10% worst tail
+  min_cell_size: 30     # minimum samples for Mondrian cell
