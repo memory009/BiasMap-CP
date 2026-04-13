@@ -57,7 +57,7 @@ from src.diagnosis.group_construction import (
 )
 
 # ── Paths ─────────────────────────────────────────────────────────────
-MODEL_ID   = "Qwen/Qwen2-VL-2B-Instruct"
+DEFAULT_MODEL_ID = "Qwen/Qwen2-VL-2B-Instruct"
 CACHE_DIR  = "/LOCAL2/psqhe8/hf_cache"
 SPLITS_DIR = Path("data/splits")
 B1_DIR     = Path("results/sprint2/b1_diagnosis")
@@ -103,6 +103,44 @@ EVAL_EVERY_EPOCH = True
 BINARY_PROMPT = 'Look at the image. Is the following spatial statement true or false?\n\nStatement: "{caption}"\n\nAnswer with ONLY "true" or "false".'
 OPEN_PROMPT   = 'Look at the image carefully. Answer the following spatial reasoning question with a short answer.\n\nQuestion: {question}\n\nAnswer:'
 SPATIAL_PROMPT = 'Look at the image carefully. Answer the following spatial reasoning question.\n\nQuestion: {question}\n\nChoose the correct answer from: {choices}\n\nAnswer with ONLY the letter or the exact answer text, nothing else.'
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# Model loading dispatch
+# ═══════════════════════════════════════════════════════════════════════
+def load_vlm_model(model_id, cache_dir, quantization_config, **kwargs):
+    """Load the correct VLM class based on model_id."""
+    if "Qwen2-VL" in model_id:
+        from transformers import Qwen2VLForConditionalGeneration
+        return Qwen2VLForConditionalGeneration.from_pretrained(
+            model_id, cache_dir=cache_dir, quantization_config=quantization_config,
+            **kwargs,
+        )
+    elif "Qwen3-VL" in model_id:
+        from transformers import Qwen3VLForConditionalGeneration
+        return Qwen3VLForConditionalGeneration.from_pretrained(
+            model_id, cache_dir=cache_dir, quantization_config=quantization_config,
+            **kwargs,
+        )
+    else:
+        raise ValueError(
+            f"Unsupported model_id: {model_id}. "
+            f"Expected model_id to contain 'Qwen2-VL' or 'Qwen3-VL'."
+        )
+
+
+def safe_model_tag(model_id):
+    """Extract a filesystem-safe short tag from model_id.
+
+    Returns '' for the default model (backward compat), otherwise e.g. 'qwen3vl2b'.
+    """
+    if model_id == DEFAULT_MODEL_ID:
+        return ""
+    # e.g. "Qwen/Qwen3-VL-4B-Instruct" -> "qwen3-vl-4b-instruct"
+    name = model_id.split("/")[-1].lower()
+    # Remove "instruct" suffix and dashes for compactness
+    name = name.replace("-instruct", "").replace("-", "")
+    return name
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -311,6 +349,7 @@ class CellCVaRWeighter:
         self.eta = 0.0              # CVaR threshold (quantile)
         self.sample_multipliers = {}  # precomputed per-cell multiplier
         self.is_warm = False
+        self.cvar_fallback_reason = None
 
     def update(self, cell_losses: dict):
         """Rescore: update cell losses and recompute binary tail multipliers.
@@ -323,21 +362,24 @@ class CellCVaRWeighter:
         self.cell_losses = cell_losses
         if not cell_losses:
             print("  [CVaR] WARNING: no eligible cells (all below min_support). Keeping stale weights.")
+            self.cvar_fallback_reason = "no_eligible_cells"
             return
 
-        # Safety check: need enough cells for meaningful CVaR
-        MIN_CELLS_FOR_CVAR = 5
-        if len(cell_losses) < MIN_CELLS_FOR_CVAR:
-            print(f"  [CVaR] WARNING: only {len(cell_losses)} eligible cells "
-                  f"(need >= {MIN_CELLS_FOR_CVAR}). Falling back to uniform weights.")
-            self.sample_multipliers = {cid: 1.0 for cid in cell_losses}
-            self.is_warm = True
-            return
-
-        # Sort cells by loss descending (worst first)
+        # Compute tail size k, then check if CVaR is feasible
         sorted_cells = sorted(cell_losses.items(), key=lambda x: x[1], reverse=True)
         n = len(sorted_cells)
-        k = max(1, int(np.ceil(n * self.alpha)))  # worst α fraction
+        k = max(1, int(np.ceil(n * self.alpha)))
+
+        # CVaR requires at least 1 tail and 1 non-tail unit
+        if n < 2 or k >= n:
+            reason = f"n={n},k={k},alpha={self.alpha}"
+            print(f"  [CVaR] WARNING: cannot form tail/non-tail split ({reason}). "
+                  f"Falling back to uniform weights.")
+            self.sample_multipliers = {cid: 1.0 for cid in cell_losses}
+            self.is_warm = True
+            self.cvar_fallback_reason = reason
+            return
+        self.cvar_fallback_reason = None
 
         # η = loss of the k-th worst cell (CVaR threshold)
         self.eta = sorted_cells[k - 1][1] if k <= n else sorted_cells[-1][1]
@@ -619,6 +661,8 @@ def main():
         "cvar_cell", "jtt_cell", "cell_only", "global",
         "cluster_cvar", "lossgroup_cvar",
     ], required=True)
+    parser.add_argument("--model_id", type=str, default=DEFAULT_MODEL_ID,
+                        help="HuggingFace model ID (default: Qwen/Qwen2-VL-2B-Instruct)")
     parser.add_argument("--seed", type=int, default=1)
     parser.add_argument("--max_epochs", type=int, default=MAX_EPOCHS)
     parser.add_argument("--grad_accum", type=int, default=GRAD_ACCUM)
@@ -649,7 +693,10 @@ def main():
     torch.manual_seed(args.seed + 42)
     np.random.seed(args.seed + 42)
 
+    model_tag = safe_model_tag(args.model_id)
     run_name = f"b2v3_{args.method}_seed{args.seed}"
+    if model_tag:
+        run_name += f"_{model_tag}"
     run_dir = OUT_DIR / run_name
     run_dir.mkdir(parents=True, exist_ok=True)
 
@@ -671,22 +718,22 @@ def main():
     is_cvar_method = args.method in ("cvar_cell", "cluster_cvar", "lossgroup_cvar")
 
     # ── 1. Load model ──
-    from transformers import Qwen2VLForConditionalGeneration, AutoProcessor
+    from transformers import AutoProcessor
     from transformers import BitsAndBytesConfig, get_cosine_schedule_with_warmup
     from peft import LoraConfig, get_peft_model, TaskType
     from qwen_vl_utils import process_vision_info
 
-    print("\nLoading model...")
+    print(f"\nLoading model: {args.model_id}")
     t0 = time.time()
     bnb_config = BitsAndBytesConfig(
         load_in_4bit=True, bnb_4bit_compute_dtype=torch.bfloat16,
         bnb_4bit_quant_type="nf4", bnb_4bit_use_double_quant=True,
     )
     processor = AutoProcessor.from_pretrained(
-        MODEL_ID, cache_dir=CACHE_DIR, trust_remote_code=True,
+        args.model_id, cache_dir=CACHE_DIR, trust_remote_code=True,
     )
-    model = Qwen2VLForConditionalGeneration.from_pretrained(
-        MODEL_ID, cache_dir=CACHE_DIR, quantization_config=bnb_config,
+    model = load_vlm_model(
+        args.model_id, cache_dir=CACHE_DIR, quantization_config=bnb_config,
         device_map="auto", trust_remote_code=True,
     )
     lora_config = LoraConfig(
@@ -930,6 +977,7 @@ def main():
                     "time_s": time.time() - rescore_t0,
                     "trigger": "warmup_end",
                     "partition_type": "group" if group_partition else "mondrian",
+                    "cvar_fallback": cvar_weighter.cvar_fallback_reason,
                 })
                 model.train()
                 print(f"  CVaR multipliers now active (tail={cvar_weighter.multiplier_clip:.1f}).")
@@ -958,6 +1006,7 @@ def main():
                     "time_s": time.time() - rescore_t0,
                     "trigger": "periodic",
                     "partition_type": "group" if group_partition else "mondrian",
+                    "cvar_fallback": cvar_weighter.cvar_fallback_reason,
                 })
                 model.train()
 
@@ -1120,8 +1169,8 @@ def main():
         best_ckpt = run_dir / "checkpoint-best"
         if best_ckpt.exists():
             from peft import PeftModel
-            base_model = Qwen2VLForConditionalGeneration.from_pretrained(
-                MODEL_ID, cache_dir=CACHE_DIR, quantization_config=bnb_config,
+            base_model = load_vlm_model(
+                args.model_id, cache_dir=CACHE_DIR, quantization_config=bnb_config,
                 device_map="auto", trust_remote_code=True,
             )
             model = PeftModel.from_pretrained(base_model, str(best_ckpt))

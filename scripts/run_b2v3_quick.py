@@ -42,7 +42,7 @@ from src.diagnosis.group_construction import (
 )
 
 # ── Quick test config ─────────────────────────────────────────────────
-MODEL_ID     = "Qwen/Qwen2-VL-2B-Instruct"
+DEFAULT_MODEL_ID = "Qwen/Qwen2-VL-2B-Instruct"
 CACHE_DIR    = "/LOCAL2/psqhe8/hf_cache"
 SPLITS_DIR   = Path("data/splits")
 B1_DIR       = Path("results/sprint2/b1_diagnosis")
@@ -72,6 +72,39 @@ RESCORE_EVERY_N  = 15     # rescore every 15 steps (ensure ≥2 rescores after w
 BINARY_PROMPT = 'Look at the image. Is the following spatial statement true or false?\n\nStatement: "{caption}"\n\nAnswer with ONLY "true" or "false".'
 OPEN_PROMPT   = 'Look at the image carefully. Answer the following spatial reasoning question with a short answer.\n\nQuestion: {question}\n\nAnswer:'
 SPATIAL_PROMPT = 'Look at the image carefully. Answer the following spatial reasoning question.\n\nQuestion: {question}\n\nChoose the correct answer from: {choices}\n\nAnswer with ONLY the letter or the exact answer text, nothing else.'
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# Model loading dispatch
+# ═══════════════════════════════════════════════════════════════════════
+def load_vlm_model(model_id, cache_dir, quantization_config, **kwargs):
+    """Load the correct VLM class based on model_id."""
+    if "Qwen2-VL" in model_id:
+        from transformers import Qwen2VLForConditionalGeneration
+        return Qwen2VLForConditionalGeneration.from_pretrained(
+            model_id, cache_dir=cache_dir, quantization_config=quantization_config,
+            **kwargs,
+        )
+    elif "Qwen3-VL" in model_id:
+        from transformers import Qwen3VLForConditionalGeneration
+        return Qwen3VLForConditionalGeneration.from_pretrained(
+            model_id, cache_dir=cache_dir, quantization_config=quantization_config,
+            **kwargs,
+        )
+    else:
+        raise ValueError(
+            f"Unsupported model_id: {model_id}. "
+            f"Expected model_id to contain 'Qwen2-VL' or 'Qwen3-VL'."
+        )
+
+
+def safe_model_tag(model_id):
+    """Extract a filesystem-safe short tag from model_id."""
+    if model_id == DEFAULT_MODEL_ID:
+        return ""
+    name = model_id.split("/")[-1].lower()
+    name = name.replace("-instruct", "").replace("-", "")
+    return name
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -242,15 +275,28 @@ class CellCVaRWeighter:
         self.multipliers = {}
         self.is_warm = False
         self.update_count = 0
+        self.cvar_fallback_reason = None
 
     def update(self, cell_losses):
         self.cell_losses = cell_losses
         if not cell_losses:
+            self.cvar_fallback_reason = "no_eligible_cells"
             return
 
         sorted_cells = sorted(cell_losses.items(), key=lambda x: x[1], reverse=True)
         n = len(sorted_cells)
         k = max(1, int(np.ceil(n * self.alpha)))
+
+        # CVaR requires at least 1 tail and 1 non-tail unit
+        if n < 2 or k >= n:
+            reason = f"n={n},k={k},alpha={self.alpha}"
+            print(f"    [CVaR] WARNING: cannot form tail/non-tail split ({reason}). "
+                  f"Falling back to uniform weights.")
+            self.multipliers = {cid: 1.0 for cid in cell_losses}
+            self.is_warm = True
+            self.cvar_fallback_reason = reason
+            return
+        self.cvar_fallback_reason = None
 
         self.eta = sorted_cells[k - 1][1] if k <= n else sorted_cells[-1][1]
 
@@ -287,6 +333,8 @@ def main():
         "cvar_cell", "global", "cluster_cvar", "lossgroup_cvar",
         "jtt_cell", "cell_only",
     ], required=True)
+    parser.add_argument("--model_id", type=str, default=DEFAULT_MODEL_ID,
+                        help="HuggingFace model ID (default: Qwen/Qwen2-VL-2B-Instruct)")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--n_groups", type=int, default=4,
                         help="Number of groups for cluster/lossgroup methods")
@@ -297,7 +345,11 @@ def main():
 
     is_cvar_method = args.method in ("cvar_cell", "cluster_cvar", "lossgroup_cvar")
 
-    run_dir = OUT_DIR / f"quick_{args.method}"
+    model_tag = safe_model_tag(args.model_id)
+    run_dir_name = f"quick_{args.method}"
+    if model_tag:
+        run_dir_name += f"_{model_tag}"
+    run_dir = OUT_DIR / run_dir_name
     run_dir.mkdir(parents=True, exist_ok=True)
 
     checks = {}  # track pass/fail for each validation
@@ -307,22 +359,22 @@ def main():
     print("=" * 60)
 
     # ── 1. Load model ──
-    from transformers import Qwen2VLForConditionalGeneration, AutoProcessor
+    from transformers import AutoProcessor
     from transformers import BitsAndBytesConfig
     from peft import LoraConfig, get_peft_model, TaskType
     from qwen_vl_utils import process_vision_info
 
-    print("\n[CHECK 1] Loading model with 4-bit + LoRA...")
+    print(f"\n[CHECK 1] Loading model with 4-bit + LoRA ({args.model_id})...")
     t0 = time.time()
     bnb_config = BitsAndBytesConfig(
         load_in_4bit=True, bnb_4bit_compute_dtype=torch.bfloat16,
         bnb_4bit_quant_type="nf4", bnb_4bit_use_double_quant=True,
     )
     processor = AutoProcessor.from_pretrained(
-        MODEL_ID, cache_dir=CACHE_DIR, trust_remote_code=True,
+        args.model_id, cache_dir=CACHE_DIR, trust_remote_code=True,
     )
-    model = Qwen2VLForConditionalGeneration.from_pretrained(
-        MODEL_ID, cache_dir=CACHE_DIR, quantization_config=bnb_config,
+    model = load_vlm_model(
+        args.model_id, cache_dir=CACHE_DIR, quantization_config=bnb_config,
         device_map="auto", trust_remote_code=True,
     )
     lora_config = LoraConfig(
