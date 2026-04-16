@@ -401,8 +401,8 @@ def run_cp_analysis(recal_results, repair_val_results, partition, alpha, run_dir
         "recal_accuracy": float(np.mean([r["correct"] for r in recal_results])),
     }
 
-    with open(run_dir / "b4_results.json", "w") as f:
-        json.dump(results, f, indent=2)
+    # Note: caller (main) writes the final results JSON with correct filename
+    # (b4_results.json or b6_results.json depending on eval_split).
 
     # Print summary
     print(f"\n{'='*60}")
@@ -456,12 +456,21 @@ def main():
     parser.add_argument("--alpha", type=float, default=ALPHA)
     parser.add_argument("--skip_inference", action="store_true",
                         help="Skip inference, use existing output files for CP analysis")
+    parser.add_argument("--eval_split", type=str, default="repair_val",
+                        help="Eval split name (default: repair_val for B4; use test/ood_* for B6)")
+    parser.add_argument("--output_dir", type=str, default=None,
+                        help="Override output root (default: results/sprint3/b4_recalibration)")
     args = parser.parse_args()
 
     # Model tag for directory naming
     model_tag = args.model_id.split("/")[-1].lower().replace("-instruct", "").replace("-", "")
-    run_name = f"{args.method}_seed{args.seed}"
-    run_dir = OUT_DIR / run_name
+    if args.output_dir:
+        out_root = Path(args.output_dir)
+        run_name = f"{args.method}_seed{args.seed}_{args.eval_split}"
+    else:
+        out_root = OUT_DIR
+        run_name = f"{args.method}_seed{args.seed}"
+    run_dir = out_root / run_name
     run_dir.mkdir(parents=True, exist_ok=True)
 
     # Checkpoint path
@@ -487,12 +496,12 @@ def main():
 
     # Load splits
     recal_samples = load_samples("recal")
-    repair_val_samples = load_samples("repair_val")
-    print(f"  Recal:      {len(recal_samples)} samples")
-    print(f"  Repair_val: {len(repair_val_samples)} samples")
+    eval_samples = load_samples(args.eval_split)
+    print(f"  Recal:       {len(recal_samples)} samples")
+    print(f"  {args.eval_split}: {len(eval_samples)} samples")
 
     recal_output_path = run_dir / "recal_outputs.jsonl"
-    repair_val_output_path = run_dir / "repair_val_outputs.jsonl"
+    eval_output_path = run_dir / f"{args.eval_split}_outputs.jsonl"
 
     if args.skip_inference:
         # Load existing outputs
@@ -501,11 +510,11 @@ def main():
         with open(recal_output_path) as f:
             for line in f:
                 recal_results.append(json.loads(line))
-        repair_val_results = []
-        with open(repair_val_output_path) as f:
+        eval_results = []
+        with open(eval_output_path) as f:
             for line in f:
-                repair_val_results.append(json.loads(line))
-        print(f"  Loaded: {len(recal_results)} recal, {len(repair_val_results)} repair_val")
+                eval_results.append(json.loads(line))
+        print(f"  Loaded: {len(recal_results)} recal, {len(eval_results)} {args.eval_split}")
     else:
         # Load model
         print("\n  Loading model...")
@@ -558,14 +567,14 @@ def main():
             recal_output_path, split_name="recal",
         )
 
-        # Phase B: Inference on repair_val
+        # Phase B: Inference on eval split
         print(f"\n{'='*60}")
-        print("Phase B: Inference on repair_val split")
+        print(f"Phase B: Inference on {args.eval_split} split")
         print(f"{'='*60}")
-        repair_val_results = run_inference(
+        eval_results = run_inference(
             model, processor, process_vision_info,
-            repair_val_samples, partition,
-            repair_val_output_path, split_name="repair_val",
+            eval_samples, partition,
+            eval_output_path, split_name=args.eval_split,
         )
 
     # Phase C/D/E: CP analysis + gate
@@ -573,7 +582,7 @@ def main():
     print("Phase C/D/E: CP Calibration + Evaluation + Gate Check")
     print(f"{'='*60}")
     results = run_cp_analysis(
-        recal_results, repair_val_results, partition, args.alpha, run_dir,
+        recal_results, eval_results, partition, args.alpha, run_dir,
     )
 
     # Save run config
@@ -583,10 +592,12 @@ def main():
         "model_id": args.model_id,
         "checkpoint": str(ckpt_dir),
         "alpha": args.alpha,
+        "eval_split": args.eval_split,
         "timestamp": datetime.now().isoformat(),
     }
     results["config"] = config
-    with open(run_dir / "b4_results.json", "w") as f:
+    out_name = "b4_results.json" if args.eval_split == "repair_val" else "b6_results.json"
+    with open(run_dir / out_name, "w") as f:
         json.dump(results, f, indent=2)
 
     return results
