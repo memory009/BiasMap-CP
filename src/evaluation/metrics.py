@@ -58,13 +58,17 @@ def compute_per_relation_metrics(outputs: List[ModelOutput],
 
 
 def compute_cvar(losses: List[float], alpha: float = 0.1) -> float:
-    """CVaR_alpha of losses: expected loss in the worst-alpha fraction."""
+    """CVaR_alpha of losses: mean of the worst-alpha fraction.
+
+    Implementation: sort descending, take top ceil(alpha * n) values and
+    average them. This is correct regardless of how many values are zero,
+    avoiding the quantile-threshold bug where >= 0 absorbs all entries.
+    """
     if not losses:
         return 0.0
-    losses_arr = np.array(losses)
-    threshold = np.quantile(losses_arr, 1 - alpha)
-    tail = losses_arr[losses_arr >= threshold]
-    return float(np.mean(tail)) if len(tail) > 0 else float(threshold)
+    sorted_desc = sorted(losses, reverse=True)
+    k = max(1, int(np.ceil(alpha * len(sorted_desc))))
+    return float(np.mean(sorted_desc[:k]))
 
 
 def _compute_ece(probs: List[float], correct: List[bool], n_bins: int = 15) -> float:
