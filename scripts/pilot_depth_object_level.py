@@ -522,6 +522,14 @@ def main():
                         help="Loss weight for auxiliary samples (default 1.0)")
     parser.add_argument("--model_id", type=str, default=MODEL_ID,
                         help="Model ID (default: Qwen3-VL-2B)")
+    parser.add_argument("--run_tag", type=str, default=None,
+                        help="Optional suffix appended to the default run directory "
+                             "(save-path only; does not change training recipe). "
+                             "Example: --run_tag r1_replication -> "
+                             "pilot_depth_object_level_seed{seed}_{model_tag}_r1_replication")
+    parser.add_argument("--output_dir", type=str, default=None,
+                        help="Optional absolute/relative output directory override. "
+                             "If set, takes precedence over --run_tag. Save-path only.")
     args = parser.parse_args()
 
     rng = np.random.default_rng(args.seed + 42)
@@ -530,7 +538,13 @@ def main():
 
     # Encode model name in output dir to avoid collisions (e.g. 2B vs 8B)
     model_tag = args.model_id.split("/")[-1].lower().replace("-instruct", "").replace("-", "")
-    run_dir = OUT_DIR / f"pilot_depth_object_level_seed{args.seed}_{model_tag}"
+    default_name = f"pilot_depth_object_level_seed{args.seed}_{model_tag}"
+    if args.output_dir:
+        run_dir = Path(args.output_dir)
+    elif args.run_tag:
+        run_dir = OUT_DIR / f"{default_name}_{args.run_tag}"
+    else:
+        run_dir = OUT_DIR / default_name
     run_dir.mkdir(parents=True, exist_ok=True)
 
     print("=" * 60)
